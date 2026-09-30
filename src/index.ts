@@ -1,6 +1,6 @@
 import { Env } from "./types";
 
-const MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
+const MODEL = "@cf/meta/llama-3.2-3b-instruct";
 const CYCLE = [2, 3, 1, 2] as const;
 
 type Body = {
@@ -62,16 +62,29 @@ function prepare(secret: string) {
   return { encodedGroups, constraints };
 }
 
+function wordsOf(text: string) {
+  return text.trim().split(/\s+/).filter(Boolean);
+}
+
+function buildZoneFromWords(words: string[], groupSizes: number[]) {
+  const groups: string[] = [];
+  let offset = 0;
+
+  for (const size of groupSizes) {
+    groups.push(words.slice(offset, offset + size).join(" "));
+    offset += size;
+  }
+
+  return groups.join(", ");
+}
+
 function parseZone(zone: string) {
   const groups = zone.split(",");
-  const groupWords = groups.map((group) =>
-    group.trim().split(/\s+/).filter(Boolean),
-  );
-  return { groups, groupWords, words: groupWords.flat() };
+  const groupWords = groups.map((g) => wordsOf(g));
+  return { groupWords, words: groupWords.flat() };
 }
 
 function validWord(word: string, constraint: Constraint) {
-  if (/['’\-]/.test(word)) return false;
   const cleaned = cleanWord(word);
   return (
     cleaned.length >= constraint.position &&
@@ -79,23 +92,14 @@ function validWord(word: string, constraint: Constraint) {
   );
 }
 
-function validateStructure(zone: string, groupSizes: number[]) {
-  const { groupWords, words } = parseZone(zone);
-  if (groupWords.length !== groupSizes.length) return false;
-  for (let i = 0; i < groupSizes.length; i++) {
-    if ((groupWords[i]?.length ?? 0) !== groupSizes[i]) return false;
-  }
-  return words.length === groupSizes.reduce((a, b) => a + b, 0);
-}
-
 function decodeZone(zone: string) {
   const { groupWords } = parseZone(zone);
   let wordIndex = 0;
   const rawGroups: string[] = [];
 
-  for (const words of groupWords) {
+  for (const group of groupWords) {
     let raw = "";
-    for (const token of words) {
+    for (const token of group) {
       const cleaned = cleanWord(token);
       const position = CYCLE[wordIndex % CYCLE.length];
       if (cleaned.length < position) throw new Error("Mot trop court.");
@@ -111,23 +115,6 @@ function decodeZone(zone: string) {
   };
 }
 
-function replaceWord(zone: string, targetIndex: number, replacement: string) {
-  const { groupWords } = parseZone(zone);
-  let index = 0;
-
-  for (let g = 0; g < groupWords.length; g++) {
-    for (let w = 0; w < groupWords[g].length; w++) {
-      if (index === targetIndex) {
-        groupWords[g][w] = replacement;
-        return groupWords.map((words) => words.join(" ")).join(", ");
-      }
-      index++;
-    }
-  }
-
-  return zone;
-}
-
 function parseCandidates(text: string) {
   return Array.from(
     new Set(
@@ -138,7 +125,7 @@ function parseCandidates(text: string) {
         .filter(Boolean)
         .flatMap((x) => x.split(/\s+/))
         .map((x) =>
-          x.replace(/^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9]+$/g, ""),
+          x.replace(/^[^A-Za-zÀ-ÿ0-9'’\-]+|[^A-Za-zÀ-ÿ0-9'’\-]+$/g, ""),
         )
         .filter(Boolean),
     ),
@@ -147,12 +134,19 @@ function parseCandidates(text: string) {
 
 async function ask(
   env: Env,
-  messages: Array<{ role: "system" | "user"; content: string }>,
-  maxTokens = 220,
+  prompt: string,
+  maxTokens = 180,
   temperature = 0.55,
 ) {
   const result = (await env.AI.run(MODEL, {
-    messages,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Tu es un rédacteur français rigoureux. Suis exactement les contraintes demandées et réponds sans explication.",
+      },
+      { role: "user", content: prompt },
+    ],
     max_tokens: maxTokens,
     temperature,
   })) as unknown as { response?: string };
@@ -160,235 +154,144 @@ async function ask(
   return typeof result?.response === "string" ? result.response.trim() : "";
 }
 
-function buildZoneFromWords(words: string[], groupSizes: number[]) {
-  const groups: string[] = [];
-  let offset = 0;
-
-  for (const size of groupSizes) {
-    groups.push(words.slice(offset, offset + size).join(" "));
-    offset += size;
-  }
-
-  return groups.join(", ");
-}
-
-async function makeBaseZone(
+async function makeBaseWords(
   env: Env,
   body: Body,
+  total: number,
   groupSizes: number[],
 ) {
-  const total = groupSizes.reduce((a, b) => a + b, 0);
   const boundaries: number[] = [];
-  let running = 0;
-
+  let sum = 0;
   for (let i = 0; i < groupSizes.length - 1; i++) {
-    running += groupSizes[i];
-    boundaries.push(running);
+    sum += groupSizes[i];
+    boundaries.push(sum);
   }
 
-  const boundaryText =
-    boundaries.length > 0
-      ? boundaries.map((n) => "après le mot " + n).join(", ")
-      : "aucune";
+  const prompt =
+    "Écris 10 propositions françaises différentes et naturelles.\n" +
+    "Chaque proposition doit contenir EXACTEMENT " + total + " mots.\n" +
+    "Contexte : " + (body.context || "libre") + "\n" +
+    "Ton : " + (body.tone || "naturel") + "\n" +
+    "Destinataire : " + (body.relation || "non précisé") + "\n" +
+    "Chaque proposition doit pouvoir rester naturelle si des virgules sont ajoutées après les mots " +
+    boundaries.join(", ") + ".\n" +
+    "Une proposition par ligne. Ne numérote pas. Pas d'explication.";
 
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const prompt =
-      "Écris 12 propositions françaises différentes et naturelles.\n" +
-      "Chaque proposition doit contenir EXACTEMENT " + total + " mots.\n" +
-      "Contexte : " + (body.context || "libre") + "\n" +
-      "Ton : " + (body.tone || "naturel") + "\n" +
-      "Destinataire : " + (body.relation || "non précisé") + "\n" +
-      "Aucune apostrophe. Aucun mot composé. Aucune ponctuation dans les propositions.\n" +
-      "IMPORTANT : chaque proposition doit rester naturelle si on ajoute ensuite des virgules " +
-      boundaryText + ".\n" +
-      "Une proposition par ligne. Ne numérote pas. N'ajoute aucune explication.";
-
-    const raw = await ask(
-      env,
-      [
-        {
-          role: "system",
-          content:
-            "Tu écris des propositions françaises naturelles avec un nombre exact de mots. Tu donnes plusieurs alternatives, une par ligne.",
-        },
-        { role: "user", content: prompt },
-      ],
-      360,
-      0.9,
-    );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const raw = await ask(env, prompt, 300, 0.85);
 
     const lines = raw
       .split(/\n+/)
       .map((line) =>
         line
           .replace(/^\s*[-•*\d.)]+\s*/, "")
-          .replace(/^["'«]+|["'»]+$/g, "")
-          .replace(/[.,!?;:]+$/g, "")
+          .replace(/^["«]+|["»]+$/g, "")
+          .replace(/[.!?;:]+$/g, "")
           .trim(),
       )
       .filter(Boolean);
 
     for (const line of lines) {
-      if (/['’\-]/.test(line)) continue;
-
-      const words = line.split(/\s+/).filter(Boolean);
-      if (words.length !== total) continue;
-
-      const zone = buildZoneFromWords(words, groupSizes);
-      if (validateStructure(zone, groupSizes)) return zone;
+      const words = wordsOf(line);
+      if (words.length === total) return words;
     }
   }
 
-  throw new Error("Impossible de créer la phrase de base.");
+  throw new Error("Impossible de créer une phrase de base rapidement.");
 }
 
-async function findReplacement(
-  env: Env,
-  body: Body,
-  zone: string,
-  wordIndex: number,
-  currentWord: string,
-  constraint: Constraint,
-) {
-  const prompt =
-    "Phrase actuelle : " + zone + "\n\n" +
-    "Remplace UNIQUEMENT le mot numéro " + (wordIndex + 1) +
-    ' "' + currentWord + '" par un autre mot français.\n' +
-    "Le remplacement doit garder la phrase naturelle et conserver au mieux le même rôle grammatical, genre, nombre ou temps.\n" +
-    "Contrainte absolue : la " + constraint.position +
-    "e lettre du nouveau mot doit être exactement " + constraint.letter + ".\n" +
-    "Pas d'apostrophe. Pas de tiret. Un seul mot.\n" +
-    "Contexte général : " + (body.context || "libre") + "\n" +
-    "Propose 12 remplacements possibles, du plus naturel au moins naturel, séparés uniquement par des virgules.";
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const text = await ask(
-      env,
-      [
-        {
-          role: "system",
-          content:
-            "Tu proposes des remplacements d'un seul mot dans une phrase française. Chaque proposition doit respecter exactement la position de lettre demandée.",
-        },
-        { role: "user", content: prompt },
-      ],
-      130,
-      0.75 + attempt * 0.08,
-    );
-
-    const candidates = parseCandidates(text).filter((word) =>
-      validWord(word, constraint),
-    );
-
-    if (candidates.length > 0) return candidates[0];
-  }
-
-  throw new Error(
-    "Impossible de corriger le mot " +
-      (wordIndex + 1) +
-      " (" +
-      constraint.position +
-      "e lettre = " +
-      constraint.letter +
-      ").",
-  );
-}
-
-async function repairZone(
+async function replacementOptions(
   env: Env,
   body: Body,
   baseZone: string,
-  constraints: Constraint[],
-  groupSizes: number[],
+  wordIndex: number,
+  word: string,
+  constraint: Constraint,
 ) {
-  let zone = baseZone;
+  const prompt =
+    "Phrase : " + baseZone + "\n" +
+    "Le mot numéro " + (wordIndex + 1) + ' est "' + word + '".\n' +
+    "Propose 10 mots français pouvant remplacer UNIQUEMENT ce mot sans casser la grammaire.\n" +
+    "Même rôle grammatical si possible.\n" +
+    "Contrainte absolue : la " + constraint.position +
+    "e lettre doit être " + constraint.letter + ".\n" +
+    "Réponds uniquement avec 10 mots séparés par des virgules.";
+
+  const raw = await ask(env, prompt, 100, 0.8);
+  return parseCandidates(raw).filter((candidate) =>
+    validWord(candidate, constraint),
+  );
+}
+
+async function repairInParallel(
+  env: Env,
+  body: Body,
+  baseWords: string[],
+  groupSizes: number[],
+  constraints: Constraint[],
+) {
+  const baseZone = buildZoneFromWords(baseWords, groupSizes);
+  const badIndexes: number[] = [];
 
   for (let i = 0; i < constraints.length; i++) {
-    const parsed = parseZone(zone);
-    const currentWord = parsed.words[i];
-
-    if (!currentWord) throw new Error("Structure de phrase invalide.");
-
-    if (validWord(currentWord, constraints[i])) continue;
-
-    const replacement = await findReplacement(
-      env,
-      body,
-      zone,
-      i,
-      currentWord,
-      constraints[i],
-    );
-
-    zone = replaceWord(zone, i, replacement);
-
-    if (!validateStructure(zone, groupSizes)) {
-      throw new Error("La correction a cassé la structure du message.");
-    }
+    if (!validWord(baseWords[i], constraints[i])) badIndexes.push(i);
   }
 
-  return zone;
-}
+  if (badIndexes.length === 0) return baseWords;
 
-async function judgeNaturalness(env: Env, body: Body, zone: string) {
-  const prompt =
-    "Évalue uniquement si cette proposition paraît naturelle et compréhensible en français dans le contexte donné.\n" +
-    "Contexte : " + (body.context || "libre") + "\n" +
-    "Proposition : " + zone + "\n" +
-    "Réponds uniquement NATUREL si elle pourrait apparaître dans une vraie lettre, sinon BIZARRE.";
-
-  const verdict = await ask(
-    env,
-    [
-      {
-        role: "system",
-        content:
-          "Tu es un relecteur de français. Tu réponds uniquement NATUREL ou BIZARRE.",
-      },
-      { role: "user", content: prompt },
-    ],
-    12,
-    0.1,
-  );
-
-  return verdict.toUpperCase().includes("NATUREL");
-}
-
-async function wrapLetter(env: Env, body: Body, zone: string) {
-  const marker = "[[ZONE_CODEE]]";
-
-  const prompt =
-    "Écris une petite lettre française naturelle et crédible.\n" +
-    "Contexte : " + (body.context || "libre") + "\n" +
-    "Ton : " + (body.tone || "naturel") + "\n" +
-    "Destinataire : " + (body.relation || "non précisé") + "\n" +
-    "Informations visibles à intégrer : " + (body.visibleInfo || "aucune") + "\n\n" +
-    "La proposition qui sera insérée à la place du marqueur est : " + zone + "\n" +
-    "Place exactement une fois le marqueur " + marker + " à l'endroit où cette proposition s'intègre naturellement.\n" +
-    "N'écris PAS toi-même la proposition dans la lettre, utilise seulement le marqueur.\n" +
-    "Réponds uniquement avec la lettre finale.";
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const draft = await ask(
-      env,
-      [
-        {
-          role: "system",
-          content:
-            "Tu rédiges des lettres françaises courtes et naturelles en plaçant exactement un marqueur imposé.",
-        },
-        { role: "user", content: prompt },
-      ],
-      360,
-      0.65,
+  for (let round = 0; round < 2; round++) {
+    const results = await Promise.all(
+      badIndexes.map((i) =>
+        replacementOptions(
+          env,
+          body,
+          baseZone,
+          i,
+          baseWords[i],
+          constraints[i],
+        ),
+      ),
     );
 
-    if (draft.includes(marker)) {
-      return draft.replace(marker, "(" + zone + ")");
+    const repaired = [...baseWords];
+    let allFound = true;
+
+    for (let j = 0; j < badIndexes.length; j++) {
+      const options = results[j];
+      if (!options.length) {
+        allFound = false;
+        continue;
+      }
+      repaired[badIndexes[j]] = options[0];
     }
+
+    if (allFound) return repaired;
   }
 
-  return "Bonjour,\n\n(" + zone + ")\n\nBien à vous.";
+  throw new Error("Certains mots n'ont pas pu être corrigés.");
+}
+
+function quickLetter(body: Body, zone: string) {
+  const tone = (body.tone || "Naturel").toLowerCase();
+  const info = (body.visibleInfo || "").trim();
+
+  let hello = "Bonjour,";
+  let intro = "Je voulais simplement vous transmettre ces quelques informations.";
+  let outro = "Bien à vous.";
+
+  if (tone.includes("amical")) {
+    hello = "Salut,";
+    intro = "Je voulais juste te tenir au courant.";
+    outro = "À bientôt.";
+  } else if (tone.includes("formel") || tone.includes("professionnel")) {
+    intro = "Je souhaitais simplement vous transmettre ces quelques informations.";
+    outro = "Bien cordialement.";
+  } else if (tone.includes("myst")) {
+    intro = "Je préfère vous transmettre cela simplement.";
+  }
+
+  const extra = info ? "\n\n" + info : "";
+  return hello + "\n\n" + intro + " (" + zone + ")." + extra + "\n\n" + outro;
 }
 
 async function handleGenerate(request: Request, env: Env) {
@@ -396,81 +299,55 @@ async function handleGenerate(request: Request, env: Env) {
   const secret = normalizeSecret(body.secret || "");
 
   if (!secret) {
-    return Response.json(
-      { error: "Le message secret est vide." },
-      { status: 400 },
-    );
+    return Response.json({ error: "Le message secret est vide." }, { status: 400 });
   }
 
   if (secret.length > 80) {
     return Response.json(
-      {
-        error:
-          "Le message secret est trop long. Utilise des abréviations courtes.",
-      },
+      { error: "Le message secret est trop long. Utilise des abréviations courtes." },
       { status: 400 },
     );
   }
 
   const { encodedGroups, constraints } = prepare(secret);
-  const groupSizes = encodedGroups.map((group) => group.length);
+  const groupSizes = encodedGroups.map((g) => g.length);
+  const total = constraints.length;
 
   let lastError = "";
 
-  for (let restart = 0; restart < 3; restart++) {
+  for (let restart = 0; restart < 2; restart++) {
     try {
-      const base = await makeBaseZone(env, body, groupSizes);
-      const zone = await repairZone(
+      const baseWords = await makeBaseWords(env, body, total, groupSizes);
+      const repairedWords = await repairInParallel(
         env,
         body,
-        base,
-        constraints,
+        baseWords,
         groupSizes,
+        constraints,
       );
 
+      const zone = buildZoneFromWords(repairedWords, groupSizes);
       const decoded = decodeZone(zone);
 
       if (decoded.message !== secret) {
-        throw new Error(
-          "La phrase corrigée ne redonne pas le message attendu.",
-        );
-      }
-
-      const natural = await judgeNaturalness(env, body, zone);
-      if (!natural && restart < 2) {
-        lastError = "La phrase était valide mais trop artificielle.";
-        continue;
-      }
-
-      const finalText = await wrapLetter(env, body, zone);
-      const finalMatch = finalText.match(/\(([\s\S]*?)\)/);
-
-      if (!finalMatch || finalMatch[1].trim() !== zone) {
-        throw new Error("La zone codée a été modifiée pendant la rédaction.");
+        throw new Error("La vérification finale du code a échoué.");
       }
 
       return Response.json({
         ok: true,
-        text: finalText,
+        text: quickLetter(body, zone),
         decoded: decoded.message,
         extraction: decoded.rawGroups,
         attempts: restart + 1,
       });
     } catch (error) {
       lastError =
-        error instanceof Error
-          ? error.message
-          : "La génération n'a pas abouti.";
+        error instanceof Error ? error.message : "La génération n'a pas abouti.";
     }
   }
 
   return Response.json(
-    {
-      ok: false,
-      error:
-        lastError ||
-        "La génération n'a pas abouti. Clique sur Régénérer.",
-    },
+    { ok: false, error: lastError || "La génération n'a pas abouti." },
     { status: 422 },
   );
 }
@@ -488,10 +365,7 @@ export default {
         return await handleGenerate(request, env);
       } catch (error) {
         console.error(error);
-        return Response.json(
-          { error: "Erreur pendant la génération." },
-          { status: 500 },
-        );
+        return Response.json({ error: "Erreur pendant la génération." }, { status: 500 });
       }
     }
 
