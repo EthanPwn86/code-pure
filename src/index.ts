@@ -1,6 +1,6 @@
 import { Env } from "./types";
 
-const MODEL="@cf/meta/llama-3.1-8b-instruct-fp8";
+const MODEL="@cf/qwen/qwen3-30b-a3b-fp8";
 const C=[2,3,1,2] as const;
 
 type Body={secret?:string;context?:string;tone?:string;visibleInfo?:string;relation?:string};
