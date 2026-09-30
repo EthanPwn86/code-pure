@@ -160,49 +160,83 @@ async function ask(
   return typeof result?.response === "string" ? result.response.trim() : "";
 }
 
+function buildZoneFromWords(words: string[], groupSizes: number[]) {
+  const groups: string[] = [];
+  let offset = 0;
+
+  for (const size of groupSizes) {
+    groups.push(words.slice(offset, offset + size).join(" "));
+    offset += size;
+  }
+
+  return groups.join(", ");
+}
+
 async function makeBaseZone(
   env: Env,
   body: Body,
   groupSizes: number[],
 ) {
   const total = groupSizes.reduce((a, b) => a + b, 0);
-  const structure = groupSizes
-    .map((size, i) => "groupe " + (i + 1) + " = " + size + " mots")
-    .join(", ");
+  const boundaries: number[] = [];
+  let running = 0;
 
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let i = 0; i < groupSizes.length - 1; i++) {
+    running += groupSizes[i];
+    boundaries.push(running);
+  }
+
+  const boundaryText =
+    boundaries.length > 0
+      ? boundaries.map((n) => "après le mot " + n).join(", ")
+      : "aucune";
+
+  for (let attempt = 0; attempt < 4; attempt++) {
     const prompt =
-      "Écris une seule proposition française naturelle et crédible de exactement " +
-      total +
-      " mots.\n" +
+      "Écris 12 propositions françaises différentes et naturelles.\n" +
+      "Chaque proposition doit contenir EXACTEMENT " + total + " mots.\n" +
       "Contexte : " + (body.context || "libre") + "\n" +
       "Ton : " + (body.tone || "naturel") + "\n" +
       "Destinataire : " + (body.relation || "non précisé") + "\n" +
-      "Structure obligatoire : " + structure + ".\n" +
-      "Sépare les groupes uniquement avec une virgule suivie d'un espace.\n" +
-      "Aucune autre ponctuation. Pas d'apostrophe ni de mot composé.\n" +
-      "Le résultat doit avoir un vrai sens, comme un fragment normal de lettre.\n" +
-      "Réponds uniquement avec la proposition.";
+      "Aucune apostrophe. Aucun mot composé. Aucune ponctuation dans les propositions.\n" +
+      "IMPORTANT : chaque proposition doit rester naturelle si on ajoute ensuite des virgules " +
+      boundaryText + ".\n" +
+      "Une proposition par ligne. Ne numérote pas. N'ajoute aucune explication.";
 
-    const candidate = (await ask(
+    const raw = await ask(
       env,
       [
         {
           role: "system",
           content:
-            "Tu écris des phrases françaises naturelles en respectant exactement un nombre de mots et des virgules imposées.",
+            "Tu écris des propositions françaises naturelles avec un nombre exact de mots. Tu donnes plusieurs alternatives, une par ligne.",
         },
         { role: "user", content: prompt },
       ],
-      180,
-      0.75,
-    ))
-      .replace(/^["'«]+|["'»]+$/g, "")
-      .replace(/^\(|\)$/g, "")
-      .replace(/[.!?]+$/g, "")
-      .trim();
+      360,
+      0.9,
+    );
 
-    if (validateStructure(candidate, groupSizes)) return candidate;
+    const lines = raw
+      .split(/\n+/)
+      .map((line) =>
+        line
+          .replace(/^\s*[-•*\d.)]+\s*/, "")
+          .replace(/^["'«]+|["'»]+$/g, "")
+          .replace(/[.,!?;:]+$/g, "")
+          .trim(),
+      )
+      .filter(Boolean);
+
+    for (const line of lines) {
+      if (/['’\-]/.test(line)) continue;
+
+      const words = line.split(/\s+/).filter(Boolean);
+      if (words.length !== total) continue;
+
+      const zone = buildZoneFromWords(words, groupSizes);
+      if (validateStructure(zone, groupSizes)) return zone;
+    }
   }
 
   throw new Error("Impossible de créer la phrase de base.");
@@ -301,7 +335,7 @@ async function judgeNaturalness(env: Env, body: Body, zone: string) {
     "Évalue uniquement si cette proposition paraît naturelle et compréhensible en français dans le contexte donné.\n" +
     "Contexte : " + (body.context || "libre") + "\n" +
     "Proposition : " + zone + "\n" +
-    "Réponds uniquement NATURAl si elle pourrait apparaître dans une vraie lettre, sinon BIZARRE.";
+    "Réponds uniquement NATUREL si elle pourrait apparaître dans une vraie lettre, sinon BIZARRE.";
 
   const verdict = await ask(
     env,
