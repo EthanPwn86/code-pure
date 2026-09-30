@@ -1,183 +1,108 @@
 <!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>LLM Chat App</title>
-		<style>
-			:root {
-				--primary-color: #f6821f;
-				--primary-hover: #e67e22;
-				--light-bg: #f9fafb;
-				--border-color: #e5e7eb;
-				--text-color: #1f2937;
-				--text-light: #6b7280;
-				--user-msg-bg: #fff2e6;
-				--assistant-msg-bg: #f3f4f6;
-			}
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Code Pure</title>
+  <style>
+    :root {
+      --bg:#0a0d12; --panel:#131923; --panel2:#0e141d; --border:#2b3442;
+      --text:#f2efe5; --muted:#a8b0be; --gold:#c9aa68; --gold2:#9e824b;
+      --ok:#6fd08c; --bad:#f17d7d;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(circle at top,#121927 0,#0a0d12 42%);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;min-height:100vh}
+    .wrap{max-width:980px;margin:auto;padding:34px 18px 56px}
+    header{text-align:center;margin-bottom:24px}
+    h1{font-family:Georgia,serif;letter-spacing:.18em;font-size:2rem;margin:0 0 6px}
+    header p{color:var(--muted);margin:0}
+    .tabs{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+    button{font:inherit;font-weight:700;cursor:pointer;border:1px solid var(--border);border-radius:10px;padding:12px 16px;background:#1a1711;color:var(--text)}
+    button:hover{border-color:var(--gold2)}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .tab.active,.primary{background:var(--gold);border-color:var(--gold);color:#12100c}
+    .panel{background:rgba(19,25,35,.96);border:1px solid var(--border);border-radius:15px;padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.22)}
+    .hidden{display:none!important}
+    label{display:block;font-weight:750;margin:15px 0 7px}
+    input,textarea,select{width:100%;border:1px solid var(--border);border-radius:10px;background:var(--panel2);color:var(--text);padding:12px 13px;font:inherit;outline:none}
+    input:focus,textarea:focus,select:focus{border-color:var(--gold2)}
+    textarea{min-height:120px;resize:vertical}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+    .status,.result{margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:11px;background:var(--panel2);white-space:pre-wrap;line-height:1.55}
+    .status{color:var(--muted)}
+    .ok{color:var(--ok)} .bad{color:var(--bad)}
+    .resultText{white-space:pre-wrap;font-family:Georgia,serif;font-size:1.04rem;line-height:1.75}
+    .meta{margin-top:12px;color:var(--muted);font-size:.9rem}
+    .rules{margin-top:14px;text-align:center;color:var(--muted);font-size:.86rem}
+    .copy{margin-top:12px}
+    @media(max-width:720px){.row,.tabs{grid-template-columns:1fr}.wrap{padding:18px 10px 34px}.panel{padding:16px}h1{font-size:1.65rem}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>CODE PURE</h1>
+      <p>Encodeur et décodeur de messages</p>
+    </header>
 
-			* {
-				box-sizing: border-box;
-				margin: 0;
-				padding: 0;
-			}
+    <div class="tabs">
+      <button class="tab active" data-tab="encoder">ENCODER</button>
+      <button class="tab" data-tab="decoder">DÉCODER</button>
+    </div>
 
-			body {
-				font-family:
-					-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
-					Cantarell, sans-serif;
-				line-height: 1.6;
-				color: var(--text-color);
-				max-width: 800px;
-				margin: 0 auto;
-				padding: 1rem;
-			}
+    <section id="encoder" class="panel">
+      <label for="secret">Message secret</label>
+      <input id="secret" value="REU QG PDT PL" placeholder="Ex. REU QG PDT PL" />
 
-			header {
-				text-align: center;
-				margin-bottom: 2rem;
-				padding: 1rem 0;
-				border-bottom: 1px solid var(--border-color);
-			}
+      <div class="row">
+        <div>
+          <label for="context">Contexte apparent</label>
+          <input id="context" placeholder="Ex. Je préviens un collègue au sujet des prochains cours." />
+        </div>
+        <div>
+          <label for="tone">Ton</label>
+          <select id="tone">
+            <option>Naturel</option>
+            <option>Amical</option>
+            <option>Formel</option>
+            <option>Professionnel</option>
+            <option>Mystérieux</option>
+          </select>
+        </div>
+      </div>
 
-			h1 {
-				font-size: 1.5rem;
-				color: var(--primary-color);
-			}
+      <label for="visibleInfo">Informations visibles à intégrer <span style="color:var(--muted);font-weight:400">(facultatif)</span></label>
+      <input id="visibleInfo" placeholder="Ex. Je serai disponible vendredi en fin de journée." />
 
-			.chat-container {
-				display: flex;
-				flex-direction: column;
-				height: calc(100vh - 200px);
-				min-height: 400px;
-				border: 1px solid var(--border-color);
-				border-radius: 8px;
-				overflow: hidden;
-			}
+      <label for="relation">Destinataire / relation <span style="color:var(--muted);font-weight:400">(facultatif)</span></label>
+      <input id="relation" placeholder="Ex. un professeur, un ami proche, un collègue..." />
 
-			.chat-messages {
-				flex: 1;
-				overflow-y: auto;
-				padding: 1rem;
-				background-color: var(--light-bg);
-			}
+      <div class="actions">
+        <button id="generateBtn" class="primary">GÉNÉRER ET VÉRIFIER</button>
+        <button id="regenerateBtn" class="hidden">RÉGÉNÉRER</button>
+      </div>
 
-			.message {
-				margin-bottom: 1rem;
-				padding: 0.75rem;
-				border-radius: 8px;
-				max-width: 80%;
-			}
+      <div id="generationStatus" class="status hidden"></div>
 
-			.message p {
-				white-space: pre-line;
-				margin: 0;
-				overflow-wrap: anywhere;
-			}
+      <div id="generationResult" class="result hidden">
+        <div id="resultText" class="resultText"></div>
+        <div id="resultMeta" class="meta"></div>
+        <button id="copyBtn" class="copy">COPIER LE TEXTE</button>
+      </div>
+    </section>
 
-			.user-message {
-				background-color: var(--user-msg-bg);
-				align-self: flex-end;
-				margin-left: auto;
-			}
+    <section id="decoder" class="panel hidden">
+      <label for="decodeInput">Lettre ou texte reçu</label>
+      <textarea id="decodeInput" placeholder="Colle ici le texte contenant la zone codée entre parenthèses..."></textarea>
+      <div class="actions">
+        <button id="decodeBtn" class="primary">DÉCODER</button>
+      </div>
+      <div id="decodeResult" class="result hidden"></div>
+    </section>
 
-			.assistant-message {
-				background-color: var(--assistant-msg-bg);
-				align-self: flex-start;
-			}
-
-			.message-input {
-				display: flex;
-				padding: 0.75rem;
-				border-top: 1px solid var(--border-color);
-				background-color: white;
-			}
-
-			#user-input {
-				flex: 1;
-				padding: 0.75rem;
-				border: 1px solid var(--border-color);
-				border-radius: 4px;
-				font-family: inherit;
-				resize: none;
-				min-height: 44px;
-			}
-
-			#send-button {
-				margin-left: 0.5rem;
-				padding: 0 1rem;
-				background-color: var(--primary-color);
-				color: white;
-				border: none;
-				border-radius: 4px;
-				cursor: pointer;
-				transition: background-color 0.2s;
-			}
-
-			#send-button:hover {
-				background-color: var(--primary-hover);
-			}
-
-			#send-button:disabled {
-				background-color: var(--text-light);
-				cursor: not-allowed;
-			}
-
-			.typing-indicator {
-				display: none;
-				font-style: italic;
-				color: var(--text-light);
-				padding: 1rem;
-			}
-
-			.typing-indicator.visible {
-				display: block;
-			}
-
-			footer {
-				margin-top: 1rem;
-				text-align: center;
-				font-size: 0.85rem;
-				color: var(--text-light);
-			}
-		</style>
-	</head>
-	<body>
-		<header>
-			<h1>Cloudflare AI Chat</h1>
-			<p>Powered by Cloudflare Workers AI</p>
-		</header>
-
-		<div class="chat-container">
-			<div id="chat-messages" class="chat-messages">
-				<div class="message assistant-message">
-					<p>
-						Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can
-						I help you today?
-					</p>
-				</div>
-			</div>
-
-			<div class="typing-indicator" id="typing-indicator">
-				AI is thinking...
-			</div>
-
-			<div class="message-input">
-				<textarea
-					id="user-input"
-					placeholder="Type your message here..."
-					rows="1"
-					autofocus
-				></textarea>
-				<button id="send-button">Send</button>
-			</div>
-		</div>
-
-		<footer>
-			<p>Cloudflare Workers AI Chat Template &copy; 2025</p>
-		</footer>
-
-		<!-- Chat app script -->
-		<script src="chat.js"></script>
-	</body>
+    <div class="rules">( ) = zone codée · 2312 = positions · , = espace · 21 = inversion par paires</div>
+  </main>
+  <script src="chat.js"></script>
+</body>
 </html>
