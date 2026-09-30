@@ -1,230 +1,172 @@
-/**
- * LLM Chat App Frontend
- *
- * Handles the chat UI interactions and communication with the backend API.
- */
+const CYCLE = [2, 3, 1, 2];
 
-// DOM elements
-const chatMessages = document.getElementById("chat-messages");
-const userInput = document.getElementById("user-input");
-const sendButton = document.getElementById("send-button");
-const typingIndicator = document.getElementById("typing-indicator");
+const tabs = document.querySelectorAll(".tab");
+const panels = {
+  encoder: document.getElementById("encoder"),
+  decoder: document.getElementById("decoder"),
+};
 
-// Chat state
-let chatHistory = [
-	{
-		role: "assistant",
-		content:
-			"Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can I help you today?",
-	},
-];
-let isProcessing = false;
-
-// Auto-resize textarea as user types
-userInput.addEventListener("input", function () {
-	this.style.height = "auto";
-	this.style.height = this.scrollHeight + "px";
+tabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    tabs.forEach((t) => t.classList.remove("active"));
+    Object.values(panels).forEach((p) => p.classList.add("hidden"));
+    tab.classList.add("active");
+    panels[tab.dataset.tab].classList.remove("hidden");
+  });
 });
 
-// Send message on Enter (without Shift)
-userInput.addEventListener("keydown", function (e) {
-	if (e.key === "Enter" && !e.shiftKey) {
-		e.preventDefault();
-		sendMessage();
-	}
+function normalizeSecret(input) {
+  return input
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function reversePairs(value) {
+  let out = "";
+  for (let i = 0; i < value.length; i += 2) {
+    out += i + 1 < value.length ? value[i + 1] + value[i] : value[i];
+  }
+  return out;
+}
+
+function lettersOnly(token) {
+  return token
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toUpperCase();
+}
+
+function decodeText(text) {
+  const match = text.match(/\(([\s\S]*?)\)/);
+  if (!match) throw new Error("Aucune zone codée trouvée entre parenthèses.");
+
+  const zone = match[1].trim();
+  const groups = zone.split(",");
+  const rawGroups = [];
+  let globalWordIndex = 0;
+
+  for (const group of groups) {
+    const tokens = group.trim().split(/\s+/).filter(Boolean);
+    let raw = "";
+
+    for (const token of tokens) {
+      const word = lettersOnly(token);
+      if (!word) continue;
+
+      const position = CYCLE[globalWordIndex % CYCLE.length];
+      if (word.length < position) {
+        throw new Error('Mot trop court : "' + token + '" pour la position ' + position + ".");
+      }
+
+      raw += word[position - 1];
+      globalWordIndex++;
+    }
+
+    rawGroups.push(raw);
+  }
+
+  return {
+    zone,
+    rawGroups,
+    message: rawGroups.map(reversePairs).join(" "),
+  };
+}
+
+const generateBtn = document.getElementById("generateBtn");
+const regenerateBtn = document.getElementById("regenerateBtn");
+const statusBox = document.getElementById("generationStatus");
+const resultBox = document.getElementById("generationResult");
+const resultText = document.getElementById("resultText");
+const resultMeta = document.getElementById("resultMeta");
+const copyBtn = document.getElementById("copyBtn");
+
+async function generate() {
+  const secret = normalizeSecret(document.getElementById("secret").value);
+  if (!secret) {
+    statusBox.classList.remove("hidden");
+    statusBox.innerHTML = '<span class="bad">Entre un message secret.</span>';
+    return;
+  }
+
+  const payload = {
+    secret,
+    context: document.getElementById("context").value.trim(),
+    tone: document.getElementById("tone").value,
+    visibleInfo: document.getElementById("visibleInfo").value.trim(),
+    relation: document.getElementById("relation").value.trim(),
+  };
+
+  generateBtn.disabled = true;
+  regenerateBtn.disabled = true;
+  resultBox.classList.add("hidden");
+  statusBox.classList.remove("hidden");
+  statusBox.textContent = "Génération en cours… Le texte est vérifié automatiquement avant affichage.";
+
+  try {
+    const response = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || "La génération a échoué.");
+    }
+
+    resultText.textContent = data.text;
+    resultMeta.innerHTML =
+      '<span class="ok">✓ Vérifié automatiquement : ' +
+      data.decoded +
+      "</span> · " +
+      data.attempts +
+      " tentative(s)";
+    resultBox.classList.remove("hidden");
+    regenerateBtn.classList.remove("hidden");
+    statusBox.classList.add("hidden");
+  } catch (error) {
+    statusBox.innerHTML =
+      '<span class="bad">✗ ' +
+      (error?.message || "Erreur inconnue.") +
+      "</span>";
+    regenerateBtn.classList.remove("hidden");
+  } finally {
+    generateBtn.disabled = false;
+    regenerateBtn.disabled = false;
+  }
+}
+
+generateBtn.addEventListener("click", generate);
+regenerateBtn.addEventListener("click", generate);
+
+copyBtn.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(resultText.textContent || "");
+  const old = copyBtn.textContent;
+  copyBtn.textContent = "COPIÉ ✓";
+  setTimeout(() => (copyBtn.textContent = old), 1200);
 });
 
-// Send button click handler
-sendButton.addEventListener("click", sendMessage);
+document.getElementById("decodeBtn").addEventListener("click", () => {
+  const box = document.getElementById("decodeResult");
+  box.classList.remove("hidden");
 
-/**
- * Sends a message to the chat API and processes the response
- */
-async function sendMessage() {
-	const message = userInput.value.trim();
-
-	// Don't send empty messages
-	if (message === "" || isProcessing) return;
-
-	// Disable input while processing
-	isProcessing = true;
-	userInput.disabled = true;
-	sendButton.disabled = true;
-
-	// Add user message to chat
-	addMessageToChat("user", message);
-
-	// Clear input
-	userInput.value = "";
-	userInput.style.height = "auto";
-
-	// Show typing indicator
-	typingIndicator.classList.add("visible");
-
-	// Add message to history
-	chatHistory.push({ role: "user", content: message });
-
-	try {
-		// Create new assistant response element
-		const assistantMessageEl = document.createElement("div");
-		assistantMessageEl.className = "message assistant-message";
-		assistantMessageEl.innerHTML = "<p></p>";
-		chatMessages.appendChild(assistantMessageEl);
-		const assistantTextEl = assistantMessageEl.querySelector("p");
-
-		// Scroll to bottom
-		chatMessages.scrollTop = chatMessages.scrollHeight;
-
-		// Send request to API
-		const response = await fetch("/api/chat", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({
-				messages: chatHistory,
-			}),
-		});
-
-		// Handle errors
-		if (!response.ok) {
-			throw new Error("Failed to get response");
-		}
-		if (!response.body) {
-			throw new Error("Response body is null");
-		}
-
-		// Process streaming response
-		const reader = response.body.getReader();
-		const decoder = new TextDecoder();
-		let responseText = "";
-		let buffer = "";
-		const flushAssistantText = () => {
-			assistantTextEl.textContent = responseText;
-			chatMessages.scrollTop = chatMessages.scrollHeight;
-		};
-
-		let sawDone = false;
-		while (true) {
-			const { done, value } = await reader.read();
-
-			if (done) {
-				// Process any remaining complete events in buffer
-				const parsed = consumeSseEvents(buffer + "\n\n");
-				for (const data of parsed.events) {
-					if (data === "[DONE]") {
-						break;
-					}
-					try {
-						const jsonData = JSON.parse(data);
-						// Handle both Workers AI format (response) and OpenAI format (choices[0].delta.content)
-						let content = "";
-						if (
-							typeof jsonData.response === "string" &&
-							jsonData.response.length > 0
-						) {
-							content = jsonData.response;
-						} else if (jsonData.choices?.[0]?.delta?.content) {
-							content = jsonData.choices[0].delta.content;
-						}
-						if (content) {
-							responseText += content;
-							flushAssistantText();
-						}
-					} catch (e) {
-						console.error("Error parsing SSE data as JSON:", e, data);
-					}
-				}
-				break;
-			}
-
-			// Decode chunk
-			buffer += decoder.decode(value, { stream: true });
-			const parsed = consumeSseEvents(buffer);
-			buffer = parsed.buffer;
-			for (const data of parsed.events) {
-				if (data === "[DONE]") {
-					sawDone = true;
-					buffer = "";
-					break;
-				}
-				try {
-					const jsonData = JSON.parse(data);
-					// Handle both Workers AI format (response) and OpenAI format (choices[0].delta.content)
-					let content = "";
-					if (
-						typeof jsonData.response === "string" &&
-						jsonData.response.length > 0
-					) {
-						content = jsonData.response;
-					} else if (jsonData.choices?.[0]?.delta?.content) {
-						content = jsonData.choices[0].delta.content;
-					}
-					if (content) {
-						responseText += content;
-						flushAssistantText();
-					}
-				} catch (e) {
-					console.error("Error parsing SSE data as JSON:", e, data);
-				}
-			}
-			if (sawDone) {
-				break;
-			}
-		}
-
-		// Add completed response to chat history
-		if (responseText.length > 0) {
-			chatHistory.push({ role: "assistant", content: responseText });
-		}
-	} catch (error) {
-		console.error("Error:", error);
-		addMessageToChat(
-			"assistant",
-			"Sorry, there was an error processing your request.",
-		);
-	} finally {
-		// Hide typing indicator
-		typingIndicator.classList.remove("visible");
-
-		// Re-enable input
-		isProcessing = false;
-		userInput.disabled = false;
-		sendButton.disabled = false;
-		userInput.focus();
-	}
-}
-
-/**
- * Helper function to add message to chat
- */
-function addMessageToChat(role, content) {
-	const messageEl = document.createElement("div");
-	messageEl.className = `message ${role}-message`;
-	messageEl.innerHTML = `<p>${content}</p>`;
-	chatMessages.appendChild(messageEl);
-
-	// Scroll to bottom
-	chatMessages.scrollTop = chatMessages.scrollHeight;
-}
-
-function consumeSseEvents(buffer) {
-	let normalized = buffer.replace(/\r/g, "");
-	const events = [];
-	let eventEndIndex;
-	while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
-		const rawEvent = normalized.slice(0, eventEndIndex);
-		normalized = normalized.slice(eventEndIndex + 2);
-
-		const lines = rawEvent.split("\n");
-		const dataLines = [];
-		for (const line of lines) {
-			if (line.startsWith("data:")) {
-				dataLines.push(line.slice("data:".length).trimStart());
-			}
-		}
-		if (dataLines.length === 0) continue;
-		events.push(dataLines.join("\n"));
-	}
-	return { events, buffer: normalized };
-}
+  try {
+    const decoded = decodeText(document.getElementById("decodeInput").value);
+    box.innerHTML =
+      '<span class="ok">✓ MESSAGE DÉCODÉ</span>\n\n' +
+      decoded.message +
+      "\n\nExtraction : " +
+      decoded.rawGroups.join(", ");
+  } catch (error) {
+    box.innerHTML =
+      '<span class="bad">✗ ' +
+      (error?.message || "Décodage impossible.") +
+      "</span>";
+  }
+});
