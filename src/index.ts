@@ -12,7 +12,6 @@ type Body = {
 };
 
 type Constraint = {
-  index: number;
   position: number;
   letter: string;
   group: number;
@@ -47,48 +46,110 @@ function cleanWord(value: string): string {
 function prepare(secret: string) {
   const encodedGroups = secret.split(" ").filter(Boolean).map(reversePairs);
   const constraints: Constraint[] = [];
-  let index = 0;
+  let wordIndex = 0;
 
   encodedGroups.forEach((group, groupIndex) => {
     for (const letter of group) {
       constraints.push({
-        index,
-        position: CYCLE[index % CYCLE.length],
+        position: CYCLE[wordIndex % CYCLE.length],
         letter,
         group: groupIndex,
       });
-      index++;
+      wordIndex++;
     }
   });
 
   return { encodedGroups, constraints };
 }
 
-function validForConstraint(word: string, constraint: Constraint) {
+function parseZone(zone: string) {
+  const groups = zone.split(",");
+  const groupWords = groups.map((group) =>
+    group.trim().split(/\s+/).filter(Boolean),
+  );
+  return { groups, groupWords, words: groupWords.flat() };
+}
+
+function validWord(word: string, constraint: Constraint) {
   if (/['’\-]/.test(word)) return false;
-  const w = cleanWord(word);
-  return w.length >= constraint.position &&
-    w[constraint.position - 1] === constraint.letter;
+  const cleaned = cleanWord(word);
+  return (
+    cleaned.length >= constraint.position &&
+    cleaned[constraint.position - 1] === constraint.letter
+  );
 }
 
-function parseWordList(text: string) {
-  return Array.from(new Set(
-    text
-      .replace(/[\[\]{}"]/g, " ")
-      .split(/[\n,;|]+/)
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .flatMap((x) => x.split(/\s+/))
-      .map((x) => x.replace(/^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9]+$/g, ""))
-      .filter(Boolean)
-  ));
+function validateStructure(zone: string, groupSizes: number[]) {
+  const { groupWords, words } = parseZone(zone);
+  if (groupWords.length !== groupSizes.length) return false;
+  for (let i = 0; i < groupSizes.length; i++) {
+    if ((groupWords[i]?.length ?? 0) !== groupSizes[i]) return false;
+  }
+  return words.length === groupSizes.reduce((a, b) => a + b, 0);
 }
 
-async function runText(
+function decodeZone(zone: string) {
+  const { groupWords } = parseZone(zone);
+  let wordIndex = 0;
+  const rawGroups: string[] = [];
+
+  for (const words of groupWords) {
+    let raw = "";
+    for (const token of words) {
+      const cleaned = cleanWord(token);
+      const position = CYCLE[wordIndex % CYCLE.length];
+      if (cleaned.length < position) throw new Error("Mot trop court.");
+      raw += cleaned[position - 1];
+      wordIndex++;
+    }
+    rawGroups.push(raw);
+  }
+
+  return {
+    rawGroups,
+    message: rawGroups.map(reversePairs).join(" "),
+  };
+}
+
+function replaceWord(zone: string, targetIndex: number, replacement: string) {
+  const { groupWords } = parseZone(zone);
+  let index = 0;
+
+  for (let g = 0; g < groupWords.length; g++) {
+    for (let w = 0; w < groupWords[g].length; w++) {
+      if (index === targetIndex) {
+        groupWords[g][w] = replacement;
+        return groupWords.map((words) => words.join(" ")).join(", ");
+      }
+      index++;
+    }
+  }
+
+  return zone;
+}
+
+function parseCandidates(text: string) {
+  return Array.from(
+    new Set(
+      text
+        .replace(/[\[\]{}"«»]/g, " ")
+        .split(/[\n,;|]+/)
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .flatMap((x) => x.split(/\s+/))
+        .map((x) =>
+          x.replace(/^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9]+$/g, ""),
+        )
+        .filter(Boolean),
+    ),
+  );
+}
+
+async function ask(
   env: Env,
   messages: Array<{ role: "system" | "user"; content: string }>,
-  maxTokens = 180,
-  temperature = 0.5,
+  maxTokens = 220,
+  temperature = 0.55,
 ) {
   const result = (await env.AI.run(MODEL, {
     messages,
@@ -99,259 +160,201 @@ async function runText(
   return typeof result?.response === "string" ? result.response.trim() : "";
 }
 
-async function candidateWords(env: Env, constraint: Constraint) {
-  const base =
-    "Donne 25 mots français simples et courants. " +
-    "Contrainte unique : la " + constraint.position +
-    "e lettre du mot doit être exactement " + constraint.letter + ". " +
-    "Réponds uniquement avec les mots séparés par des virgules. " +
-    "Pas d'apostrophe, pas de tiret, pas d'explication.";
-
-  const first = await runText(
-    env,
-    [
-      {
-        role: "system",
-        content:
-          "Tu proposes uniquement des mots français respectant exactement une position de lettre.",
-      },
-      { role: "user", content: base },
-    ],
-    150,
-    0.7,
-  );
-
-  let words = parseWordList(first).filter((w) =>
-    validForConstraint(w, constraint),
-  );
-
-  if (words.length < 6) {
-    const second = await runText(
-      env,
-      [
-        {
-          role: "system",
-          content:
-            "Tu proposes uniquement des mots français respectant exactement une position de lettre.",
-        },
-        {
-          role: "user",
-          content:
-            base +
-            " Cherche d'autres mots. Tu peux utiliser pluriels, conjugaisons et mots courants empruntés.",
-        },
-      ],
-      170,
-      0.9,
-    );
-
-    words = Array.from(new Set(
-      words.concat(
-        parseWordList(second).filter((w) =>
-          validForConstraint(w, constraint),
-        ),
-      ),
-    ));
-  }
-
-  return words.slice(0, 16);
-}
-
-function decodeZone(zone: string) {
-  const groups = zone.split(",");
-  let wordIndex = 0;
-  const rawGroups: string[] = [];
-
-  for (const group of groups) {
-    let raw = "";
-    const words = group.trim().split(/\s+/).filter(Boolean);
-
-    for (const token of words) {
-      const w = cleanWord(token);
-      const position = CYCLE[wordIndex % CYCLE.length];
-
-      if (w.length < position) {
-        throw new Error("Mot trop court dans la zone codée.");
-      }
-
-      raw += w[position - 1];
-      wordIndex++;
-    }
-
-    rawGroups.push(raw);
-  }
-
-  return {
-    rawGroups,
-    message: rawGroups.map(reversePairs).join(" "),
-  };
-}
-
-function validateZone(
-  zone: string,
-  secret: string,
-  encodedGroups: string[],
-  constraints: Constraint[],
-) {
-  const groups = zone.split(",");
-  const groupWords = groups.map((g) =>
-    g.trim().split(/\s+/).filter(Boolean),
-  );
-  const flat = groupWords.flat();
-  const issues: string[] = [];
-
-  if (groups.length !== encodedGroups.length) {
-    issues.push(
-      "Il faut " + encodedGroups.length +
-      " groupes, pas " + groups.length + ".",
-    );
-  }
-
-  encodedGroups.forEach((g, i) => {
-    const count = groupWords[i]?.length ?? 0;
-    if (count !== g.length) {
-      issues.push(
-        "Groupe " + (i + 1) + " : " + count +
-        " mots au lieu de " + g.length + ".",
-      );
-    }
-  });
-
-  if (flat.length !== constraints.length) {
-    issues.push(
-      "Il faut " + constraints.length +
-      " mots au total, pas " + flat.length + ".",
-    );
-  }
-
-  for (let i = 0; i < Math.min(flat.length, constraints.length); i++) {
-    if (!validForConstraint(flat[i], constraints[i])) {
-      issues.push(
-        "Mot " + (i + 1) + " non compatible : " + flat[i] + ".",
-      );
-    }
-  }
-
-  let decoded = "";
-  try {
-    decoded = decodeZone(zone).message;
-    if (decoded !== secret) {
-      issues.push(
-        "Décodage obtenu : " + decoded + " au lieu de " + secret + ".",
-      );
-    }
-  } catch (error) {
-    issues.push(
-      error instanceof Error ? error.message : "Décodage impossible.",
-    );
-  }
-
-  return { ok: issues.length === 0, decoded, issues };
-}
-
-async function buildZone(
+async function makeBaseZone(
   env: Env,
   body: Body,
-  secret: string,
-  encodedGroups: string[],
-  constraints: Constraint[],
-  pools: string[][],
+  groupSizes: number[],
 ) {
-  const groupSizes = encodedGroups.map((g) => g.length);
-  const poolText = pools
-    .map((pool, i) =>
-      "Emplacement " + (i + 1) +
-      " : [" + pool.join(", ") + "]"
-    )
-    .join("\n");
-
-  const structureText = groupSizes
-    .map((size, i) =>
-      "groupe " + (i + 1) + " = " + size + " mots"
-    )
+  const total = groupSizes.reduce((a, b) => a + b, 0);
+  const structure = groupSizes
+    .map((size, i) => "groupe " + (i + 1) + " = " + size + " mots")
     .join(", ");
 
-  let feedback = "";
-
-  for (let attempt = 1; attempt <= 5; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     const prompt =
-      "Construis UNE SEULE proposition française naturelle destinée à une lettre.\n\n" +
-      "Contexte apparent : " + (body.context || "libre") + "\n" +
+      "Écris une seule proposition française naturelle et crédible de exactement " +
+      total +
+      " mots.\n" +
+      "Contexte : " + (body.context || "libre") + "\n" +
       "Ton : " + (body.tone || "naturel") + "\n" +
-      "Destinataire : " + (body.relation || "non précisé") + "\n\n" +
-      "Choisis exactement UN mot dans chaque liste ci-dessous, dans l'ordre.\n" +
-      "Tu n'as pas le droit d'utiliser un mot absent de sa liste.\n" +
-      "Structure exacte : " + structureText + "\n" +
-      "Sépare les groupes uniquement par une virgule suivie d'un espace.\n" +
-      "N'ajoute aucune autre ponctuation.\n" +
-      "Réponds uniquement avec la proposition, sans parenthèses.\n\n" +
-      poolText + "\n\n" +
-      "La proposition complète doit avoir un vrai sens en français, pas une suite de mots." +
-      (feedback ? "\nCorrection : " + feedback : "");
+      "Destinataire : " + (body.relation || "non précisé") + "\n" +
+      "Structure obligatoire : " + structure + ".\n" +
+      "Sépare les groupes uniquement avec une virgule suivie d'un espace.\n" +
+      "Aucune autre ponctuation. Pas d'apostrophe ni de mot composé.\n" +
+      "Le résultat doit avoir un vrai sens, comme un fragment normal de lettre.\n" +
+      "Réponds uniquement avec la proposition.";
 
-    const candidate = await runText(
+    const candidate = (await ask(
       env,
       [
         {
           role: "system",
           content:
-            "Tu construis une phrase française naturelle en sélectionnant des mots dans des listes imposées. Respecte exactement l'ordre et les virgules.",
+            "Tu écris des phrases françaises naturelles en respectant exactement un nombre de mots et des virgules imposées.",
         },
         { role: "user", content: prompt },
       ],
-      220,
-      0.35,
-    );
-
-    const zone = candidate
+      180,
+      0.75,
+    ))
       .replace(/^["'«]+|["'»]+$/g, "")
       .replace(/^\(|\)$/g, "")
+      .replace(/[.!?]+$/g, "")
       .trim();
 
-    const validation = validateZone(
-      zone,
-      secret,
-      encodedGroups,
-      constraints,
+    if (validateStructure(candidate, groupSizes)) return candidate;
+  }
+
+  throw new Error("Impossible de créer la phrase de base.");
+}
+
+async function findReplacement(
+  env: Env,
+  body: Body,
+  zone: string,
+  wordIndex: number,
+  currentWord: string,
+  constraint: Constraint,
+) {
+  const prompt =
+    "Phrase actuelle : " + zone + "\n\n" +
+    "Remplace UNIQUEMENT le mot numéro " + (wordIndex + 1) +
+    ' "' + currentWord + '" par un autre mot français.\n' +
+    "Le remplacement doit garder la phrase naturelle et conserver au mieux le même rôle grammatical, genre, nombre ou temps.\n" +
+    "Contrainte absolue : la " + constraint.position +
+    "e lettre du nouveau mot doit être exactement " + constraint.letter + ".\n" +
+    "Pas d'apostrophe. Pas de tiret. Un seul mot.\n" +
+    "Contexte général : " + (body.context || "libre") + "\n" +
+    "Propose 12 remplacements possibles, du plus naturel au moins naturel, séparés uniquement par des virgules.";
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const text = await ask(
+      env,
+      [
+        {
+          role: "system",
+          content:
+            "Tu proposes des remplacements d'un seul mot dans une phrase française. Chaque proposition doit respecter exactement la position de lettre demandée.",
+        },
+        { role: "user", content: prompt },
+      ],
+      130,
+      0.75 + attempt * 0.08,
     );
 
-    if (validation.ok) return zone;
-    feedback = validation.issues.join(" ");
+    const candidates = parseCandidates(text).filter((word) =>
+      validWord(word, constraint),
+    );
+
+    if (candidates.length > 0) return candidates[0];
   }
 
   throw new Error(
-    "Impossible d'assembler une phrase naturelle avec les mots compatibles.",
+    "Impossible de corriger le mot " +
+      (wordIndex + 1) +
+      " (" +
+      constraint.position +
+      "e lettre = " +
+      constraint.letter +
+      ").",
   );
 }
 
-async function wrapLetter(env: Env, body: Body, zone: string) {
-  const literal = "(" + zone + ")";
+async function repairZone(
+  env: Env,
+  body: Body,
+  baseZone: string,
+  constraints: Constraint[],
+  groupSizes: number[],
+) {
+  let zone = baseZone;
 
+  for (let i = 0; i < constraints.length; i++) {
+    const parsed = parseZone(zone);
+    const currentWord = parsed.words[i];
+
+    if (!currentWord) throw new Error("Structure de phrase invalide.");
+
+    if (validWord(currentWord, constraints[i])) continue;
+
+    const replacement = await findReplacement(
+      env,
+      body,
+      zone,
+      i,
+      currentWord,
+      constraints[i],
+    );
+
+    zone = replaceWord(zone, i, replacement);
+
+    if (!validateStructure(zone, groupSizes)) {
+      throw new Error("La correction a cassé la structure du message.");
+    }
+  }
+
+  return zone;
+}
+
+async function judgeNaturalness(env: Env, body: Body, zone: string) {
   const prompt =
-    "Écris une petite lettre française naturelle et crédible.\n\n" +
+    "Évalue uniquement si cette proposition paraît naturelle et compréhensible en français dans le contexte donné.\n" +
     "Contexte : " + (body.context || "libre") + "\n" +
-    "Ton : " + (body.tone || "naturel") + "\n" +
-    "Destinataire : " + (body.relation || "non précisé") + "\n" +
-    "Informations visibles : " + (body.visibleInfo || "aucune") + "\n\n" +
-    "Intègre EXACTEMENT, caractère pour caractère, ce passage :\n" +
-    literal + "\n\n" +
-    "Ne modifie aucun mot, aucune virgule ni parenthèse de ce passage. " +
-    "Tu peux écrire librement avant et après pour que la lettre ait un sens naturel. " +
-    "Réponds uniquement avec la lettre finale.";
+    "Proposition : " + zone + "\n" +
+    "Réponds uniquement NATURAl si elle pourrait apparaître dans une vraie lettre, sinon BIZARRE.";
 
-  return runText(
+  const verdict = await ask(
     env,
     [
       {
         role: "system",
         content:
-          "Tu es un rédacteur français. Tu intègres littéralement le passage imposé sans le modifier.",
+          "Tu es un relecteur de français. Tu réponds uniquement NATUREL ou BIZARRE.",
       },
       { role: "user", content: prompt },
     ],
-    420,
-    0.55,
+    12,
+    0.1,
   );
+
+  return verdict.toUpperCase().includes("NATUREL");
+}
+
+async function wrapLetter(env: Env, body: Body, zone: string) {
+  const marker = "[[ZONE_CODEE]]";
+
+  const prompt =
+    "Écris une petite lettre française naturelle et crédible.\n" +
+    "Contexte : " + (body.context || "libre") + "\n" +
+    "Ton : " + (body.tone || "naturel") + "\n" +
+    "Destinataire : " + (body.relation || "non précisé") + "\n" +
+    "Informations visibles à intégrer : " + (body.visibleInfo || "aucune") + "\n\n" +
+    "La proposition qui sera insérée à la place du marqueur est : " + zone + "\n" +
+    "Place exactement une fois le marqueur " + marker + " à l'endroit où cette proposition s'intègre naturellement.\n" +
+    "N'écris PAS toi-même la proposition dans la lettre, utilise seulement le marqueur.\n" +
+    "Réponds uniquement avec la lettre finale.";
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const draft = await ask(
+      env,
+      [
+        {
+          role: "system",
+          content:
+            "Tu rédiges des lettres françaises courtes et naturelles en plaçant exactement un marqueur imposé.",
+        },
+        { role: "user", content: prompt },
+      ],
+      360,
+      0.65,
+    );
+
+    if (draft.includes(marker)) {
+      return draft.replace(marker, "(" + zone + ")");
+    }
+  }
+
+  return "Bonjour,\n\n(" + zone + ")\n\nBien à vous.";
 }
 
 async function handleGenerate(request: Request, env: Env) {
@@ -376,86 +379,66 @@ async function handleGenerate(request: Request, env: Env) {
   }
 
   const { encodedGroups, constraints } = prepare(secret);
+  const groupSizes = encodedGroups.map((group) => group.length);
 
-  const unique = new Map<string, Promise<string[]>>();
+  let lastError = "";
 
-  for (const c of constraints) {
-    const key = c.position + ":" + c.letter;
-    if (!unique.has(key)) {
-      unique.set(key, candidateWords(env, c));
-    }
-  }
-
-  const poolMap = new Map<string, string[]>();
-
-  await Promise.all(
-    Array.from(unique.entries()).map(async ([key, promise]) => {
-      poolMap.set(key, await promise);
-    }),
-  );
-
-  const pools = constraints.map((c) =>
-    poolMap.get(c.position + ":" + c.letter) || [],
-  );
-
-  const missing = pools.findIndex((p) => p.length < 3);
-
-  if (missing !== -1) {
-    const c = constraints[missing];
-    return Response.json(
-      {
-        error:
-          "Pas assez de mots trouvés pour le mot " + (missing + 1) +
-          " (" + c.position + "e lettre = " + c.letter + "). Régénère.",
-      },
-      { status: 422 },
-    );
-  }
-
-  try {
-    const zone = await buildZone(
-      env,
-      body,
-      secret,
-      encodedGroups,
-      constraints,
-      pools,
-    );
-
-    const decoded = decodeZone(zone);
-
-    if (decoded.message !== secret) {
-      throw new Error("La zone n'a pas passé la vérification.");
-    }
-
-    const finalText = await wrapLetter(env, body, zone);
-    const literal = "(" + zone + ")";
-
-    if (!finalText.includes(literal)) {
-      throw new Error(
-        "La rédaction finale a modifié la zone codée. Clique sur Régénérer.",
+  for (let restart = 0; restart < 3; restart++) {
+    try {
+      const base = await makeBaseZone(env, body, groupSizes);
+      const zone = await repairZone(
+        env,
+        body,
+        base,
+        constraints,
+        groupSizes,
       );
-    }
 
-    return Response.json({
-      ok: true,
-      text: finalText,
-      decoded: decoded.message,
-      extraction: decoded.rawGroups,
-      attempts: 1,
-    });
-  } catch (error) {
-    return Response.json(
-      {
-        ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "La génération n'a pas abouti. Clique sur Régénérer.",
-      },
-      { status: 422 },
-    );
+      const decoded = decodeZone(zone);
+
+      if (decoded.message !== secret) {
+        throw new Error(
+          "La phrase corrigée ne redonne pas le message attendu.",
+        );
+      }
+
+      const natural = await judgeNaturalness(env, body, zone);
+      if (!natural && restart < 2) {
+        lastError = "La phrase était valide mais trop artificielle.";
+        continue;
+      }
+
+      const finalText = await wrapLetter(env, body, zone);
+      const finalMatch = finalText.match(/\(([\s\S]*?)\)/);
+
+      if (!finalMatch || finalMatch[1].trim() !== zone) {
+        throw new Error("La zone codée a été modifiée pendant la rédaction.");
+      }
+
+      return Response.json({
+        ok: true,
+        text: finalText,
+        decoded: decoded.message,
+        extraction: decoded.rawGroups,
+        attempts: restart + 1,
+      });
+    } catch (error) {
+      lastError =
+        error instanceof Error
+          ? error.message
+          : "La génération n'a pas abouti.";
+    }
   }
+
+  return Response.json(
+    {
+      ok: false,
+      error:
+        lastError ||
+        "La génération n'a pas abouti. Clique sur Régénérer.",
+    },
+    { status: 422 },
+  );
 }
 
 export default {
